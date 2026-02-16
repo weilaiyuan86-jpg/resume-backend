@@ -8,7 +8,6 @@ const port = process.env.PORT || 3000
 app.use(cors())
 app.use(express.json())
 
-// 数据库连接池配置
 const pool = new Pool({
   host: process.env.PGHOST || "82.29.197.201",
   port: Number(process.env.PGPORT || 5432),
@@ -17,12 +16,10 @@ const pool = new Pool({
   database: process.env.PGDATABASE || "postgres",
 })
 
-// 健康检查
 app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
 
-// 数据库测试接口：建表 + 插入一行 + 返回总数
 app.get("/db-test", async (req, res) => {
   try {
     await pool.query(`
@@ -51,7 +48,6 @@ app.get("/db-test", async (req, res) => {
   }
 })
 
-// 业务：简历表初始化
 async function ensureResumesTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS resumes (
@@ -64,7 +60,6 @@ async function ensureResumesTable() {
   `)
 }
 
-// 创建简历
 app.post("/resumes", async (req, res) => {
   const { userId, title, content } = req.body || {}
 
@@ -100,7 +95,6 @@ app.post("/resumes", async (req, res) => {
   }
 })
 
-// 列出最近 20 条简历
 app.get("/resumes", async (req, res) => {
   try {
     await ensureResumesTable()
