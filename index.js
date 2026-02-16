@@ -51,6 +51,87 @@ app.get("/db-test", async (req, res) => {
   }
 })
 
+// 业务：简历表初始化
+async function ensureResumesTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS resumes (
+      id SERIAL PRIMARY KEY,
+      user_id TEXT,
+      title TEXT,
+      content TEXT,
+      created_at TIMESTAMPTZ DEFAULT now()
+    )
+  `)
+}
+
+// 创建简历
+app.post("/resumes", async (req, res) => {
+  const { userId, title, content } = req.body || {}
+
+  if (!content) {
+    return res.status(400).json({
+      ok: false,
+      error: "content is required",
+    })
+  }
+
+  try {
+    await ensureResumesTable()
+
+    const result = await pool.query(
+      `
+      INSERT INTO resumes (user_id, title, content)
+      VALUES ($1, $2, $3)
+      RETURNING id, user_id AS "userId", title, content, created_at AS "createdAt"
+      `,
+      [userId || null, title || null, content]
+    )
+
+    res.status(201).json({
+      ok: true,
+      resume: result.rows[0],
+    })
+  } catch (error) {
+    console.error("create resume error:", error)
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    })
+  }
+})
+
+// 列出最近 20 条简历
+app.get("/resumes", async (req, res) => {
+  try {
+    await ensureResumesTable()
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id AS "userId",
+        title,
+        content,
+        created_at AS "createdAt"
+      FROM resumes
+      ORDER BY created_at DESC
+      LIMIT 20
+      `
+    )
+
+    res.json({
+      ok: true,
+      resumes: result.rows,
+    })
+  } catch (error) {
+    console.error("list resumes error:", error)
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    })
+  }
+})
+
 app.listen(port, () => {
   console.log(`API server listening on port ${port}`)
 })
