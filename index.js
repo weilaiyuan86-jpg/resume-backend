@@ -60,6 +60,7 @@ async function ensureResumesTable() {
   `)
 }
 
+// 创建简历
 app.post("/resumes", async (req, res) => {
   const { userId, title, content } = req.body || {}
 
@@ -95,7 +96,8 @@ app.post("/resumes", async (req, res) => {
   }
 })
 
-app.get("/resumes", async (req, res) => {
+// 列出最近 20 条简历
+app.get("/resumes", async (_req, res) => {
   try {
     await ensureResumesTable()
 
@@ -119,6 +121,126 @@ app.get("/resumes", async (req, res) => {
     })
   } catch (error) {
     console.error("list resumes error:", error)
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    })
+  }
+})
+
+// 获取单个简历
+app.get("/resumes/:id", async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: "invalid id" })
+  }
+
+  try {
+    await ensureResumesTable()
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id AS "userId",
+        title,
+        content,
+        created_at AS "createdAt"
+      FROM resumes
+      WHERE id = $1
+      `,
+      [id]
+    )
+
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: "not found" })
+    }
+
+    res.json({
+      ok: true,
+      resume: result.rows[0],
+    })
+  } catch (error) {
+    console.error("get resume error:", error)
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    })
+  }
+})
+
+// 更新简历
+app.put("/resumes/:id", async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: "invalid id" })
+  }
+
+  const { title, content } = req.body || {}
+  if (!content) {
+    return res.status(400).json({
+      ok: false,
+      error: "content is required",
+    })
+  }
+
+  try {
+    await ensureResumesTable()
+
+    const result = await pool.query(
+      `
+      UPDATE resumes
+      SET title = $1,
+          content = $2
+      WHERE id = $3
+      RETURNING id, user_id AS "userId", title, content, created_at AS "createdAt"
+      `,
+      [title || null, content, id]
+    )
+
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: "not found" })
+    }
+
+    res.json({
+      ok: true,
+      resume: result.rows[0],
+    })
+  } catch (error) {
+    console.error("update resume error:", error)
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    })
+  }
+})
+
+// 删除简历
+app.delete("/resumes/:id", async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: "invalid id" })
+  }
+
+  try {
+    await ensureResumesTable()
+
+    const result = await pool.query(
+      `
+      DELETE FROM resumes
+      WHERE id = $1
+      RETURNING id
+      `,
+      [id]
+    )
+
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: "not found" })
+    }
+
+    res.json({ ok: true })
+  } catch (error) {
+    console.error("delete resume error:", error)
     res.status(500).json({
       ok: false,
       error: error.message,
