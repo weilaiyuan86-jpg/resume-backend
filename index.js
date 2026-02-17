@@ -11,15 +11,23 @@ const port = process.env.PORT || 3000
 app.use(cors())
 app.use(express.json())
 
+const requiredEnv = ["PGPASSWORD", "JWT_SECRET"]
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    console.error(`${key} environment variable is required`)
+    process.exit(1)
+  }
+}
+
 const pool = new Pool({
-  host: process.env.PGHOST || "82.29.197.201",
+  host: process.env.PGHOST || "localhost",
   port: Number(process.env.PGPORT || 5432),
   user: process.env.PGUSER || "postgres",
-  password: process.env.PGPASSWORD || "Resume123!",
+  password: process.env.PGPASSWORD,
   database: process.env.PGDATABASE || "postgres",
 })
 
-const JWT_SECRET = process.env.JWT_SECRET || "EvalShare-JWT-Secret-Change-This"
+const JWT_SECRET = process.env.JWT_SECRET
 
 function createToken(user) {
   return jwt.sign(
@@ -235,14 +243,74 @@ app.post("/auth/login", async (req, res) => {
   }
 })
 
-app.get("/me", auth, (req, res) => {
-  res.json({
-    ok: true,
-    user: {
-      id: req.user.id,
-      email: req.user.email,
-    },
-  })
+app.get("/me", auth, async (req, res) => {
+  try {
+    const current = await getUserById(req.user.id)
+    if (!current) {
+      return res.status(404).json({ ok: false, error: "user not found" })
+    }
+    res.json({
+      ok: true,
+      user: current,
+    })
+  } catch (error) {
+    console.error("me error:", error)
+    res.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.patch("/me", auth, async (req, res) => {
+  const { fullName } = req.body || {}
+  const name = typeof fullName === "string" ? fullName.trim() : undefined
+
+  const fields = []
+  const values = []
+  let index = 1
+
+  if (typeof name === "string") {
+    fields.push(`full_name = $${index++}`)
+    values.push(name || null)
+  }
+
+  if (!fields.length) {
+    return res.status(400).json({ ok: false, error: "no fields to update" })
+  }
+
+  values.push(req.user.id)
+
+  try {
+    await ensureUsersTable()
+    const result = await pool.query(
+      `
+      UPDATE users
+      SET ${fields.join(", ")}
+      WHERE id = $${index}
+      RETURNING id, email, full_name, role, plan, created_at
+      `,
+      values
+    )
+
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: "not found" })
+    }
+
+    const row = result.rows[0]
+
+    res.json({
+      ok: true,
+      user: {
+        id: row.id,
+        email: row.email,
+        fullName: row.full_name,
+        role: row.role,
+        plan: row.plan,
+        createdAt: row.created_at,
+      },
+    })
+  } catch (error) {
+    console.error("update me error:", error)
+    res.status(500).json({ ok: false, error: error.message })
+  }
 })
 
 async function getUserById(id) {
