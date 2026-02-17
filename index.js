@@ -81,6 +81,26 @@ async function ensureResumesTable() {
   `)
 }
 
+async function ensureNavigationTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS navigation_items (
+      id SERIAL PRIMARY KEY,
+      position TEXT NOT NULL,
+      label TEXT NOT NULL,
+      path TEXT NOT NULL,
+      parent_id INTEGER,
+      order_index INTEGER NOT NULL DEFAULT 0,
+      visible BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now()
+    )
+  `)
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS navigation_items_position_idx
+    ON navigation_items(position)
+  `)
+}
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
@@ -110,6 +130,36 @@ app.get("/db-test", async (req, res) => {
       ok: false,
       error: error.message,
     })
+  }
+})
+
+app.get("/navigation", async (req, res) => {
+  const positionRaw = typeof req.query.position === "string" ? req.query.position : "header"
+  const position = positionRaw === "footer" ? "footer" : "header"
+  try {
+    await ensureNavigationTable()
+    const result = await pool.query(
+      `
+      SELECT id, position, label, path, parent_id, order_index, visible
+      FROM navigation_items
+      WHERE position = $1 AND visible = TRUE
+      ORDER BY order_index ASC, id ASC
+      `,
+      [position]
+    )
+    const items = result.rows.map((row) => ({
+      id: row.id,
+      position: row.position,
+      label: row.label,
+      path: row.path,
+      parentId: row.parent_id,
+      orderIndex: row.order_index,
+      visible: row.visible,
+    }))
+    res.json({ ok: true, items })
+  } catch (error) {
+    console.error("navigation list error:", error)
+    res.status(500).json({ ok: false, error: error.message })
   }
 })
 
@@ -623,6 +673,252 @@ app.get("/resumes", auth, async (req, res) => {
       ok: false,
       error: error.message,
     })
+  }
+})
+
+app.get("/admin/navigation", auth, requireAdmin, async (req, res) => {
+  const positionRaw = typeof req.query.position === "string" ? req.query.position : undefined
+  const positionFilter =
+    positionRaw && (positionRaw === "header" || positionRaw === "footer")
+      ? positionRaw
+      : undefined
+  try {
+    await ensureNavigationTable()
+    const baseQuery = `
+      SELECT id, position, label, path, parent_id, order_index, visible
+      FROM navigation_items
+    `
+    const params = []
+    let whereClause = ""
+    if (positionFilter) {
+      whereClause = "WHERE position = $1"
+      params.push(positionFilter)
+    }
+    const result = await pool.query(
+      `
+      ${baseQuery}
+      ${whereClause}
+      ORDER BY position ASC, order_index ASC, id ASC
+      `,
+      params
+    )
+    res.json({
+      ok: true,
+      items: result.rows.map((row) => ({
+        id: row.id,
+        position: row.position,
+        label: row.label,
+        path: row.path,
+        parentId: row.parent_id,
+        orderIndex: row.order_index,
+        visible: row.visible,
+      })),
+    })
+  } catch (error) {
+    console.error("admin navigation list error:", error)
+    res.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.post("/admin/navigation", auth, requireAdmin, async (req, res) => {
+  const { position, label, path, parentId, visible } = req.body || {}
+  const rawPosition = typeof position === "string" ? position.trim().toLowerCase() : ""
+  const finalPosition = rawPosition === "footer" ? "footer" : "header"
+  const finalLabel = typeof label === "string" ? label.trim() : ""
+  const finalPath = typeof path === "string" ? path.trim() : ""
+  const parentIdNumber =
+    typeof parentId === "number" && Number.isFinite(parentId) ? parentId : null
+  const visibleValue =
+    typeof visible === "boolean" ? visible : true
+
+  if (!finalLabel || !finalPath) {
+    return res.status(400).json({ ok: false, error: "label and path are required" })
+  }
+
+  try {
+    await ensureNavigationTable()
+    const maxResult = await pool.query(
+      `
+      SELECT COALESCE(MAX(order_index), 0) AS max_order
+      FROM navigation_items
+      WHERE position = $1
+      `,
+      [finalPosition]
+    )
+    const nextOrder = (maxResult.rows[0]?.max_order || 0) + 1
+
+    const insertResult = await pool.query(
+      `
+      INSERT INTO navigation_items (position, label, path, parent_id, order_index, visible)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, position, label, path, parent_id, order_index, visible
+      `,
+      [finalPosition, finalLabel, finalPath, parentIdNumber, nextOrder, visibleValue]
+    )
+
+    const row = insertResult.rows[0]
+    res.status(201).json({
+      ok: true,
+      item: {
+        id: row.id,
+        position: row.position,
+        label: row.label,
+        path: row.path,
+        parentId: row.parent_id,
+        orderIndex: row.order_index,
+        visible: row.visible,
+      },
+    })
+  } catch (error) {
+    console.error("create navigation item error:", error)
+    res.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.patch("/admin/navigation/:id", auth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: "invalid id" })
+  }
+
+  const { position, label, path, parentId, visible } = req.body || {}
+
+  const fields = []
+  const values = []
+  let index = 1
+
+  if (typeof position === "string") {
+    const raw = position.trim().toLowerCase()
+    const finalPosition = raw === "footer" ? "footer" : "header"
+    fields.push(`position = $${index++}`)
+    values.push(finalPosition)
+  }
+  if (typeof label === "string") {
+    fields.push(`label = $${index++}`)
+    values.push(label.trim())
+  }
+  if (typeof path === "string") {
+    fields.push(`path = $${index++}`)
+    values.push(path.trim())
+  }
+  if (typeof parentId === "number" && Number.isFinite(parentId)) {
+    fields.push(`parent_id = $${index++}`)
+    values.push(parentId)
+  }
+  if (parentId === null) {
+    fields.push(`parent_id = NULL`)
+  }
+  if (typeof visible === "boolean") {
+    fields.push(`visible = $${index++}`)
+    values.push(visible)
+  }
+
+  if (!fields.length) {
+    return res.status(400).json({ ok: false, error: "no fields to update" })
+  }
+
+  fields.push(`updated_at = now()`)
+  values.push(id)
+
+  try {
+    await ensureNavigationTable()
+    const result = await pool.query(
+      `
+      UPDATE navigation_items
+      SET ${fields.join(", ")}
+      WHERE id = $${index}
+      RETURNING id, position, label, path, parent_id, order_index, visible
+      `,
+      values
+    )
+
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: "not found" })
+    }
+
+    const row = result.rows[0]
+    res.json({
+      ok: true,
+      item: {
+        id: row.id,
+        position: row.position,
+        label: row.label,
+        path: row.path,
+        parentId: row.parent_id,
+        orderIndex: row.order_index,
+        visible: row.visible,
+      },
+    })
+  } catch (error) {
+    console.error("update navigation item error:", error)
+    res.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.patch("/admin/navigation/reorder", auth, requireAdmin, async (req, res) => {
+  const { position, ids } = req.body || {}
+  const rawPosition = typeof position === "string" ? position.trim().toLowerCase() : ""
+  const finalPosition = rawPosition === "footer" ? "footer" : "header"
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ ok: false, error: "ids array is required" })
+  }
+
+  const parsedIds = ids
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+
+  if (!parsedIds.length) {
+    return res.status(400).json({ ok: false, error: "no valid ids" })
+  }
+
+  try {
+    await ensureNavigationTable()
+    await pool.query("BEGIN")
+    for (let i = 0; i < parsedIds.length; i += 1) {
+      const idValue = parsedIds[i]
+      await pool.query(
+        `
+        UPDATE navigation_items
+        SET order_index = $1, updated_at = now()
+        WHERE id = $2 AND position = $3
+        `,
+        [i + 1, idValue, finalPosition]
+      )
+    }
+    await pool.query("COMMIT")
+    res.json({ ok: true })
+  } catch (error) {
+    await pool.query("ROLLBACK").catch(() => {})
+    console.error("reorder navigation items error:", error)
+    res.status(500).json({ ok: false, error: error.message })
+  }
+})
+
+app.delete("/admin/navigation/:id", auth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: "invalid id" })
+  }
+
+  try {
+    await ensureNavigationTable()
+    const result = await pool.query(
+      `
+      DELETE FROM navigation_items
+      WHERE id = $1
+      RETURNING id
+      `,
+      [id]
+    )
+
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: "not found" })
+    }
+
+    res.json({ ok: true })
+  } catch (error) {
+    console.error("delete navigation item error:", error)
+    res.status(500).json({ ok: false, error: error.message })
   }
 })
 
